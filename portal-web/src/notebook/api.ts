@@ -3,6 +3,7 @@ import {
   type IdempotentOperation,
   type NotebookApiErrorCode,
   type NotebookDocumentResponse,
+  type NotebookListResponse,
   type SaveNotebookResponse,
 } from './types'
 
@@ -38,6 +39,32 @@ export interface SaveNotebookResult
   extends SaveNotebookResponse {
   etag: string | null
   requestId: string | null
+}
+
+
+export interface ListNotebooksOptions {
+  limit?: number
+  cursor?: string
+  signal?: AbortSignal
+}
+
+export interface ListNotebooksResult
+  extends NotebookListResponse {
+  requestId: string | null
+}
+
+
+/*
+ * 主动中止（AbortSignal）的请求是调用方控制流，
+ * 不转换为错误；由调用方自行忽略。
+ */
+export function isAbortError(
+  error: unknown,
+): boolean {
+  return (
+    error instanceof DOMException
+    && error.name === 'AbortError'
+  )
 }
 
 
@@ -187,6 +214,62 @@ async function parseErrorResponse(
     details,
     retryAfter,
   )
+}
+
+
+/*
+ * GET /api/v1/notebooks
+ *
+ * - limit 只允许 1～100，页面固定使用 20；
+ * - cursor 是不透明字符串，只允许原样回传，
+ *   禁止解析、拼接或自行构造；
+ * - 列表没有 collection ETag，不发送 If-None-Match；
+ * - 空列表是正常的 200。
+ */
+export async function listNotebooks(
+  options: ListNotebooksOptions = {},
+): Promise<ListNotebooksResult> {
+  const limit = Math.min(
+    100,
+    Math.max(1, options.limit ?? 20),
+  )
+
+  const params = new URLSearchParams()
+
+  params.set('limit', String(limit))
+
+  if (options.cursor) {
+    params.set('cursor', options.cursor)
+  }
+
+  let response: Response
+
+  try {
+    response = await fetch(
+      `${NOTEBOOKS_API}?${params.toString()}`,
+      options.signal
+        ? { signal: options.signal }
+        : undefined,
+    )
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error
+    }
+
+    throw toNetworkError(error)
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response)
+  }
+
+  const body =
+    await response.json() as NotebookListResponse
+
+  return {
+    ...body,
+    requestId: requestIdOf(response),
+  }
 }
 
 

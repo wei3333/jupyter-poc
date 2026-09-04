@@ -59,6 +59,24 @@ export interface SaveNotebookResponse {
 
 
 /*
+ * 列表摘要。列表接口不返回 content/contentHash，
+ * 客户端不得为列表项假设这些字段。
+ */
+export interface NotebookSummary {
+  notebookId: string
+  title: string
+  revision: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface NotebookListResponse {
+  items: NotebookSummary[]
+  nextCursor: string | null
+}
+
+
+/*
  * 幂等写操作：一次逻辑写操作对应一个 key + 一份只序列化一次的 body。
  * 因网络错误或 5xx/503 重试时必须复用同一个 IdempotentOperation；
  * 请求内容改变时创建新操作和新 key。
@@ -77,6 +95,7 @@ export interface IdempotentOperation {
 export type NotebookApiErrorCode =
   | 'MALFORMED_JSON'
   | 'INVALID_REQUEST'
+  | 'INVALID_CURSOR'
   | 'INVALID_NOTEBOOK'
   | 'NOTEBOOK_NOT_FOUND'
   | 'REVISION_NOT_FOUND'

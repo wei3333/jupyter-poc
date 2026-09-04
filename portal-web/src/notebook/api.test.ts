@@ -13,6 +13,7 @@ import {
   createNotebook,
   getNotebook,
   getNotebookRevision,
+  listNotebooks,
   saveNotebook,
 } from './api'
 
@@ -112,6 +113,232 @@ function headersOf(
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+
+describe('listNotebooks', () => {
+  it('首次列表请求使用 GET /api/v1/notebooks?limit=20，不带 cursor', async () => {
+    const fetchMock = installFetchMock(
+      ({ url, init }) => {
+        expect(url).toBe(
+          '/api/v1/notebooks?limit=20',
+        )
+
+        expect(init?.method).toBeUndefined()
+
+        return jsonResponse(
+          {
+            items: [],
+            nextCursor: null,
+          },
+          200,
+          {
+            'X-Request-ID': 'req_list_1',
+          },
+        )
+      },
+    )
+
+    const result = await listNotebooks({
+      limit: 20,
+    })
+
+    /*
+     * 空列表是正常的成功结果。
+     */
+    expect(result.items).toEqual([])
+    expect(result.nextCursor).toBeNull()
+    expect(result.requestId)
+      .toBe('req_list_1')
+
+    /*
+     * 列表没有 collection ETag，
+     * 不发送 If-None-Match。
+     */
+    expect(
+      headersOf(fetchMock, 0)['If-None-Match'],
+    ).toBeUndefined()
+  })
+
+  it('cursor 通过 URLSearchParams 正确编码并原样传递', async () => {
+    const cursor = 'abc/def+%'
+
+    installFetchMock(({ url }) => {
+      expect(url).toBe(
+        '/api/v1/notebooks?limit=20&cursor=abc%2Fdef%2B%25',
+      )
+
+      return jsonResponse({
+        items: [],
+        nextCursor: null,
+      })
+    })
+
+    await listNotebooks({
+      limit: 20,
+      cursor,
+    })
+  })
+
+  it('正确解析 items、nextCursor 和 X-Request-ID', async () => {
+    installFetchMock(() =>
+      jsonResponse(
+        {
+          items: [
+            {
+              notebookId: 'nb_item_1',
+              title: 'First',
+              revision: 3,
+              createdAt: '2026-09-04T00:00:00Z',
+              updatedAt: '2026-09-04T01:00:00Z',
+            },
+            {
+              notebookId: 'nb_item_2',
+              title: 'Second',
+              revision: 1,
+              createdAt: '2026-09-03T00:00:00Z',
+              updatedAt: '2026-09-03T01:00:00Z',
+            },
+          ],
+          nextCursor: 'opaque_cursor_1',
+        },
+        200,
+        {
+          'X-Request-ID': 'req_list_2',
+        },
+      ),
+    )
+
+    const result = await listNotebooks({
+      limit: 20,
+    })
+
+    expect(result.items).toHaveLength(2)
+
+    expect(result.items[0].notebookId)
+      .toBe('nb_item_1')
+
+    expect(result.items[0].revision).toBe(3)
+
+    expect(result.items[1].updatedAt)
+      .toBe('2026-09-03T01:00:00Z')
+
+    expect(result.nextCursor)
+      .toBe('opaque_cursor_1')
+
+    expect(result.requestId)
+      .toBe('req_list_2')
+  })
+
+  it('400 INVALID_CURSOR 被解析为 NotebookApiError', async () => {
+    installFetchMock(() =>
+      jsonResponse(
+        {
+          error: {
+            code: 'INVALID_CURSOR',
+            message: 'Pagination cursor is invalid',
+            requestId: 'req_cursor_1',
+          },
+        },
+        400,
+        {
+          'X-Request-ID': 'req_cursor_1',
+        },
+      ),
+    )
+
+    const error = await listNotebooks({
+      cursor: 'stale_cursor',
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error)
+      .toBeInstanceOf(NotebookApiError)
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(400)
+    expect(apiError.code)
+      .toBe('INVALID_CURSOR')
+
+    expect(apiError.requestId)
+      .toBe('req_cursor_1')
+  })
+
+  it('网络失败仍得到 NETWORK_ERROR', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+
+    const error = await listNotebooks({
+      limit: 20,
+    }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error)
+      .toBeInstanceOf(NotebookApiError)
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(0)
+    expect(apiError.code).toBe('NETWORK_ERROR')
+  })
+
+  it('主动中止的请求原样抛出 AbortError 而不伪装成网络错误', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async (
+          _input: RequestInfo | URL,
+          init?: RequestInit,
+        ) => (
+          new Promise<Response>(
+            (_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => {
+                  reject(
+                    new DOMException(
+                      'The operation was aborted',
+                      'AbortError',
+                    ),
+                  )
+                },
+              )
+            },
+          )
+        ),
+      ),
+    )
+
+    const controller = new AbortController()
+
+    const pending = listNotebooks({
+      limit: 20,
+      signal: controller.signal,
+    })
+
+    controller.abort()
+
+    const error = await pending.then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(DOMException)
+
+    expect((error as DOMException).name)
+      .toBe('AbortError')
+  })
 })
 
 
