@@ -11,6 +11,7 @@ import type * as nbformat from '@jupyterlab/nbformat'
 import {
   createIdempotentOperation,
   createNotebook,
+  deleteNotebook,
   getNotebook,
   getNotebookRevision,
   listNotebooks,
@@ -772,5 +773,318 @@ describe('saveNotebook', () => {
         baseRevision: 1,
         currentRevision: 3,
       })
+  })
+})
+
+
+describe('deleteNotebook', () => {
+  it('DELETE 使用编码后的 notebookId 路径和 method: DELETE', async () => {
+    const fetchMock = installFetchMock(
+      ({ url, init }) => {
+        expect(url).toBe(
+          '/api/v1/notebooks/nb_abc123',
+        )
+
+        expect(init?.method).toBe('DELETE')
+
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'X-Request-ID': 'req_del_1',
+          },
+        })
+      },
+    )
+
+    const result = await deleteNotebook(
+      'nb_abc123',
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    expect(result.requestId).toBe('req_del_1')
+  })
+
+  it('请求没有 body、Content-Type、Idempotency-Key 和 If-Match', async () => {
+    const fetchMock = installFetchMock(
+      ({ init }) => {
+        expect(init?.body).toBeUndefined()
+
+        return new Response(null, {
+          status: 204,
+        })
+      },
+    )
+
+    await deleteNotebook('nb_abc123')
+
+    const headers = headersOf(fetchMock, 0)
+
+    expect(headers['Content-Type'])
+      .toBeUndefined()
+
+    expect(headers['Idempotency-Key'])
+      .toBeUndefined()
+
+    expect(headers['If-Match'])
+      .toBeUndefined()
+  })
+
+  it('204 返回 requestId 且绝不调用 response.json()', async () => {
+    /*
+     * 204 没有响应体：如果实现调用了
+     * response.json()，这里会抛出解析错误
+     * 而不是返回结果。
+     */
+    installFetchMock(() =>
+      new Response(null, {
+        status: 204,
+        headers: {
+          'X-Request-ID': 'req_del_2',
+        },
+      }),
+    )
+
+    const result = await deleteNotebook(
+      'nb_abc123',
+    )
+
+    expect(result.requestId).toBe('req_del_2')
+  })
+
+  it('连续两次 DELETE 都收到 204 时均按成功处理', async () => {
+    const fetchMock = installFetchMock(() =>
+      new Response(null, { status: 204 }),
+    )
+
+    const first = await deleteNotebook(
+      'nb_abc123',
+    )
+
+    const second = await deleteNotebook(
+      'nb_abc123',
+    )
+
+    expect(first.requestId).toBeNull()
+    expect(second.requestId).toBeNull()
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('404 NOTEBOOK_NOT_FOUND 解析为结构化 NotebookApiError', async () => {
+    installFetchMock(() =>
+      jsonResponse(
+        {
+          error: {
+            code: 'NOTEBOOK_NOT_FOUND',
+            message: 'Notebook was not found',
+            requestId: 'req_del_404',
+            details: {
+              notebookId: 'nb_missing',
+            },
+          },
+        },
+        404,
+        {
+          'X-Request-ID': 'req_del_404',
+        },
+      ),
+    )
+
+    const error = await deleteNotebook(
+      'nb_missing',
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error)
+      .toBeInstanceOf(NotebookApiError)
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(404)
+    expect(apiError.code)
+      .toBe('NOTEBOOK_NOT_FOUND')
+
+    expect(apiError.requestId)
+      .toBe('req_del_404')
+  })
+
+  it('422 INVALID_REQUEST 解析为结构化 NotebookApiError', async () => {
+    installFetchMock(() =>
+      jsonResponse(
+        {
+          error: {
+            code: 'INVALID_REQUEST',
+            message:
+              'Request does not match the API contract',
+            requestId: 'req_del_422',
+            details: {
+              path: '/notebookId',
+              reason: 'String should match pattern',
+            },
+          },
+        },
+        422,
+        {
+          'X-Request-ID': 'req_del_422',
+        },
+      ),
+    )
+
+    const error = await deleteNotebook(
+      'nb_bad!id',
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(422)
+    expect(apiError.code)
+      .toBe('INVALID_REQUEST')
+
+    expect(apiError.requestId)
+      .toBe('req_del_422')
+  })
+
+  it('503 正确读取 Retry-After 和 X-Request-ID', async () => {
+    installFetchMock(() =>
+      jsonResponse(
+        {
+          error: {
+            code: 'STORAGE_UNAVAILABLE',
+            message:
+              'Notebook storage is temporarily unavailable',
+            requestId: 'req_del_503',
+          },
+        },
+        503,
+        {
+          'Retry-After': '5',
+          'X-Request-ID': 'req_del_503',
+        },
+      ),
+    )
+
+    const error = await deleteNotebook(
+      'nb_abc123',
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(503)
+    expect(apiError.code)
+      .toBe('STORAGE_UNAVAILABLE')
+
+    expect(apiError.retryAfter).toBe(5)
+    expect(apiError.requestId)
+      .toBe('req_del_503')
+  })
+
+  it('网络失败转换为 NETWORK_ERROR', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+
+    const error = await deleteNotebook(
+      'nb_abc123',
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(0)
+    expect(apiError.code).toBe('NETWORK_ERROR')
+  })
+
+  it('主动中止保持 AbortError，不伪装成 NETWORK_ERROR', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async (
+          _input: RequestInfo | URL,
+          init?: RequestInit,
+        ) => (
+          new Promise<Response>(
+            (_resolve, reject) => {
+              init?.signal?.addEventListener(
+                'abort',
+                () => {
+                  reject(
+                    new DOMException(
+                      'The operation was aborted',
+                      'AbortError',
+                    ),
+                  )
+                },
+              )
+            },
+          )
+        ),
+      ),
+    )
+
+    const controller = new AbortController()
+
+    const pending = deleteNotebook(
+      'nb_abc123',
+      { signal: controller.signal },
+    )
+
+    controller.abort()
+
+    const error = await pending.then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(DOMException)
+
+    expect((error as DOMException).name)
+      .toBe('AbortError')
+  })
+
+  it('契约之外的意外 2xx 转换为可诊断错误，不静默接受', async () => {
+    installFetchMock(() =>
+      new Response(null, {
+        status: 200,
+        headers: {
+          'X-Request-ID': 'req_del_drift',
+        },
+      }),
+    )
+
+    const error = await deleteNotebook(
+      'nb_abc123',
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    )
+
+    expect(error)
+      .toBeInstanceOf(NotebookApiError)
+
+    const apiError =
+      error as NotebookApiError
+
+    expect(apiError.status).toBe(200)
+    expect(apiError.code).toBe('UNKNOWN')
+    expect(apiError.requestId)
+      .toBe('req_del_drift')
   })
 })

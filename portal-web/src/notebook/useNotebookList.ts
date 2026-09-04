@@ -25,6 +25,21 @@ export type ListErrorPhase =
 const PAGE_LIMIT = 20
 
 
+/*
+ * 从 items 中移除指定 notebookId 的摘要，
+ * 只删除目标 ID、保持其余项顺序。
+ * 供 DELETE 204 后本地移除使用。
+ */
+export function filterOutNotebook(
+  items: NotebookSummary[],
+  notebookId: string,
+): NotebookSummary[] {
+  return items.filter(
+    (item) => item.notebookId !== notebookId,
+  )
+}
+
+
 function appendUnique(
   current: NotebookSummary[],
   incoming: NotebookSummary[],
@@ -234,6 +249,24 @@ export function useNotebookList() {
   }, [loadingMore, nextCursor])
 
 
+  /*
+   * DELETE 204 后的本地移除入口。
+   * 同步移除摘要，不额外请求；
+   * 保留当前 nextCursor 原样供“加载更多”继续使用。
+   */
+  const removeItem = useCallback(
+    (notebookId: string) => {
+      setItems((current) =>
+        filterOutNotebook(
+          current,
+          notebookId,
+        ),
+      )
+    },
+    [],
+  )
+
+
   return {
     items,
     nextCursor,
@@ -243,5 +276,6 @@ export function useNotebookList() {
     errorPhase,
     refresh,
     loadMore,
+    removeItem,
   }
 }

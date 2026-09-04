@@ -418,3 +418,71 @@ export async function saveNotebook(
     requestId: requestIdOf(response),
   }
 }
+
+
+export interface DeleteNotebookOptions {
+  signal?: AbortSignal
+}
+
+export interface DeleteNotebookResult {
+  requestId: string | null
+}
+
+
+/*
+ * DELETE /api/v1/notebooks/{notebookId}
+ *
+ * - 不发送 body、Content-Type、Idempotency-Key、
+ *   baseRevision 或 If-Match；
+ * - 204 无响应体，绝不调用 response.json()；
+ * - 首次删除与重复删除均返回 204，客户端
+ *   无需 pending operation；
+ * - 契约之外的意外 2xx 转换为可诊断错误，
+ *   不静默接受，避免隐藏契约漂移。
+ */
+export async function deleteNotebook(
+  notebookId: string,
+  options: DeleteNotebookOptions = {},
+): Promise<DeleteNotebookResult> {
+  const init: RequestInit = {
+    method: 'DELETE',
+  }
+
+  if (options.signal) {
+    init.signal = options.signal
+  }
+
+  let response: Response
+
+  try {
+    response = await fetch(
+      `${NOTEBOOKS_API}/${encodeURIComponent(notebookId)}`,
+      init,
+    )
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error
+    }
+
+    throw toNetworkError(error)
+  }
+
+  if (response.status === 204) {
+    return {
+      requestId: requestIdOf(response),
+    }
+  }
+
+  if (response.ok) {
+    throw new NotebookApiError(
+      response.status,
+      'UNKNOWN',
+      `DELETE 返回了契约之外的状态码 ${response.status}，请检查 Notebook Service 版本`,
+      requestIdOf(response),
+      null,
+      null,
+    )
+  }
+
+  throw await parseErrorResponse(response)
+}

@@ -13,6 +13,7 @@ import {
   asNotebookApiError,
   createIdempotentOperation,
   createNotebook,
+  deleteNotebook,
 } from './notebook/api'
 
 import {
@@ -34,6 +35,7 @@ import type {
   CreateNotebookRequest,
   IdempotentOperation,
   NotebookApiError,
+  NotebookSummary,
 } from './notebook/types'
 
 
@@ -180,7 +182,24 @@ function HomePage({
     useRef<HTMLInputElement | null>(null)
 
 
+  /*
+   * 软删除。同一时刻只允许一个 DELETE 在途。
+   * 失败时保留列表项，错误按 notebookId 展示。
+   */
+  const [deletingNotebookId, setDeletingNotebookId] =
+    useState<string | null>(null)
+
+  const [deleteError, setDeleteError] =
+    useState<{
+      notebookId: string
+      error: NotebookApiError
+    } | null>(null)
+
+
   const uploadBusy = uploadPhase !== null
+
+  const deleteInFlight =
+    deletingNotebookId !== null
 
 
   async function handleCreate() {
@@ -394,11 +413,66 @@ function HomePage({
   }
 
 
+  function deleteRetryable(
+    error: NotebookApiError,
+  ): boolean {
+    return (
+      error.code === 'NETWORK_ERROR'
+      || error.code === 'INTERNAL_ERROR'
+      || error.code === 'STORAGE_UNAVAILABLE'
+    )
+  }
+
+
+  async function handleDelete(
+    item: NotebookSummary,
+  ) {
+    if (deleteInFlight) {
+      return
+    }
+
+    const confirmed = window.confirm(
+      `确定删除 Notebook「${item.title}」（${item.notebookId}）？\n\n`
+      + '删除后它将从普通列表和读取接口中消失；\n'
+      + '当前 Portal 没有恢复入口。\n'
+      + '服务端执行的是软删除，不会物理擦除 Notebook 内容。',
+    )
+
+    if (!confirmed) {
+      return
+    }
+
+    setDeletingNotebookId(item.notebookId)
+    setDeleteError(null)
+
+    try {
+      await deleteNotebook(item.notebookId)
+
+      /*
+       * 只有 204 才本地移除摘要；
+       * 不做乐观移除。
+       */
+      list.removeItem(item.notebookId)
+    } catch (error) {
+      /*
+       * 失败保留列表项和当前 cursor，
+       * 记录结构化错误。
+       */
+      setDeleteError({
+        notebookId: item.notebookId,
+        error: asNotebookApiError(error),
+      })
+    } finally {
+      setDeletingNotebookId(null)
+    }
+  }
+
+
   const createDisabled =
-    creating || uploadBusy
+    creating || uploadBusy || deleteInFlight
 
   const uploadDisabled =
-    uploadBusy || creating
+    uploadBusy || creating || deleteInFlight
 
 
   return (
@@ -418,99 +492,181 @@ function HomePage({
           ? (
             <p>Loading...</p>
           )
-          : list.items.length === 0
-            ? (
-              list.listError
-                && list.errorPhase === 'initial'
+          : (
+            <div>
+              {list.items.length === 0
                 ? (
-                  <div>
-                    <p style={{ color: 'red' }}>
-                      {apiErrorText(list.listError)}
-                    </p>
-
-                    <button
-                      onClick={list.refresh}
-                    >
-                      重试
-                    </button>
-                  </div>
-                )
-                : (
-                  <p>
-                    暂无 Notebook。
-                    可以创建或上传一个。
-                  </p>
-                )
-            )
-            : (
-              <div>
-                <ul>
-                  {list.items.map((item) => (
-                    <li
-                      key={item.notebookId}
-                      style={{
-                        margin: '8px 0',
-                      }}
-                    >
-                      <button
-                        onClick={() =>
-                          onOpen(
-                            item.notebookId,
-                          )
-                        }
-                      >
-                        <strong>
-                          {item.title}
-                        </strong>
-                        {' — '}
-                        revision {item.revision}
-                        {' · '}
-                        {item.updatedAt}
-                        {' · '}
-                        {item.notebookId}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-
-                {list.listError
-                  && list.errorPhase === 'initial'
-                  && (
-                    <p style={{ color: 'red' }}>
-                      {apiErrorText(
-                        list.listError,
-                      )}
-                    </p>
-                  )}
-
-                {list.nextCursor !== null
-                  && (
-                    <button
-                      disabled={
-                        list.loadingMore
-                      }
-                      onClick={list.loadMore}
-                    >
-                      {list.loadingMore
-                        ? 'Loading...'
-                        : '加载更多'}
-                    </button>
-                  )}
-
-                {list.listError
-                  && list.errorPhase === 'loadMore'
-                  && (
-                    <p style={{ color: 'red' }}>
-                      {list.listError.code
-                        === 'INVALID_CURSOR'
-                        ? '分页 cursor 已失效，请点击刷新重新加载第一页。'
-                        : apiErrorText(
+                  list.listError
+                    && list.errorPhase === 'initial'
+                    ? (
+                      <div>
+                        <p style={{ color: 'red' }}>
+                          {apiErrorText(
                             list.listError,
                           )}
-                    </p>
-                  )}
-              </div>
-            )}
+                        </p>
+
+                        <button
+                          disabled={
+                            deleteInFlight
+                          }
+                          onClick={list.refresh}
+                        >
+                          重试
+                        </button>
+                      </div>
+                    )
+                    : (
+                      <p>
+                        暂无 Notebook。
+                        可以创建或上传一个。
+                      </p>
+                    )
+                )
+                : (
+                  <ul>
+                    {list.items.map((item) => (
+                      <li
+                        key={item.notebookId}
+                        style={{
+                          margin: '8px 0',
+                        }}
+                      >
+                        <button
+                          disabled={
+                            deleteInFlight
+                          }
+                          onClick={() =>
+                            onOpen(
+                              item.notebookId,
+                            )
+                          }
+                        >
+                          <strong>
+                            {item.title}
+                          </strong>
+                          {' — '}
+                          revision {item.revision}
+                          {' · '}
+                          {item.updatedAt}
+                          {' · '}
+                          {item.notebookId}
+                        </button>
+
+                        {' '}
+
+                        <button
+                          disabled={
+                            deleteInFlight
+                          }
+                          onClick={() =>
+                            handleDelete(item)
+                          }
+                        >
+                          {deletingNotebookId
+                            === item.notebookId
+                            ? '删除中...'
+                            : '删除'}
+                        </button>
+
+                        {deleteError
+                          && deleteError.notebookId
+                            === item.notebookId
+                          && (
+                            <div
+                              style={{
+                                color: 'red',
+                              }}
+                            >
+                              <span>
+                                {apiErrorText(
+                                  deleteError.error,
+                                )}
+                              </span>
+
+                              {' '}
+
+                              {deleteRetryable(
+                                deleteError.error,
+                              )
+                                ? (
+                                  <button
+                                    disabled={
+                                      deleteInFlight
+                                    }
+                                    onClick={() =>
+                                      handleDelete(
+                                        item,
+                                      )
+                                    }
+                                  >
+                                    重试删除
+                                  </button>
+                                )
+                                : (
+                                  <button
+                                    disabled={
+                                      deleteInFlight
+                                    }
+                                    onClick={
+                                      list.refresh
+                                    }
+                                  >
+                                    刷新列表
+                                  </button>
+                                )}
+                            </div>
+                          )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+              {list.listError
+                && list.errorPhase === 'initial'
+                && list.items.length > 0
+                && (
+                  <p style={{ color: 'red' }}>
+                    {apiErrorText(
+                      list.listError,
+                    )}
+                  </p>
+                )}
+
+              {/*
+               * “加载更多”只依赖 nextCursor，
+               * 即使当前已加载的一页被逐项删除，
+               * 只要有下一页仍可继续加载。
+               */}
+              {list.nextCursor !== null
+                && (
+                  <button
+                    disabled={
+                      list.loadingMore
+                      || deleteInFlight
+                    }
+                    onClick={list.loadMore}
+                  >
+                    {list.loadingMore
+                      ? 'Loading...'
+                      : '加载更多'}
+                  </button>
+                )}
+
+              {list.listError
+                && list.errorPhase === 'loadMore'
+                && (
+                  <p style={{ color: 'red' }}>
+                    {list.listError.code
+                      === 'INVALID_CURSOR'
+                      ? '分页 cursor 已失效，请点击刷新重新加载第一页。'
+                      : apiErrorText(
+                          list.listError,
+                        )}
+                  </p>
+                )}
+            </div>
+          )}
 
 
         <p>
@@ -518,6 +674,7 @@ function HomePage({
             disabled={
               list.initialLoading
               || list.loadingMore
+              || deleteInFlight
             }
             onClick={list.refresh}
           >
