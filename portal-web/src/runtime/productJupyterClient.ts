@@ -1,10 +1,11 @@
 import {
   KernelManager,
+  KernelMessage,
   ServerConnection,
   type Kernel,
 } from '@jupyterlab/services'
 
-import type { nbformat } from '@jupyterlab/nbformat'
+import type * as nbformat from '@jupyterlab/nbformat'
 
 
 export interface CellExecutionResult {
@@ -118,68 +119,99 @@ class ProductJupyterClient {
       const type =
         message.header.msg_type
 
-      const content:
-        any = message.content
-
       switch (type) {
         case 'execute_input':
-          executionCount =
-            content.execution_count
+          if (
+            KernelMessage.isExecuteInputMsg(
+              message,
+            )
+          ) {
+            executionCount =
+              message.content.execution_count
+          }
           break
 
         case 'stream':
-          outputs.push({
-            output_type: 'stream',
-            name: content.name,
-            text: content.text,
-          } as nbformat.IOutput)
+          if (
+            KernelMessage.isStreamMsg(
+              message,
+            )
+          ) {
+            outputs.push({
+              output_type: 'stream',
+
+              name:
+                message.content.name,
+
+              text:
+                message.content.text,
+            })
+          }
           break
 
         case 'execute_result':
-          executionCount =
-            content.execution_count
+          if (
+            KernelMessage.isExecuteResultMsg(
+              message,
+            )
+          ) {
+            executionCount =
+              message.content.execution_count
 
-          outputs.push({
-            output_type:
-              'execute_result',
+            outputs.push({
+              output_type:
+                'execute_result',
 
-            execution_count:
-              content.execution_count,
+              execution_count:
+                message.content.execution_count,
 
-            data:
-              content.data,
+              data:
+                message.content.data,
 
-            metadata:
-              content.metadata,
-          } as nbformat.IOutput)
+              metadata:
+                message.content.metadata,
+            })
+          }
           break
 
         case 'display_data':
-          outputs.push({
-            output_type:
-              'display_data',
+          if (
+            KernelMessage.isDisplayDataMsg(
+              message,
+            )
+          ) {
+            outputs.push({
+              output_type:
+                'display_data',
 
-            data:
-              content.data,
+              data:
+                message.content.data,
 
-            metadata:
-              content.metadata,
-          } as nbformat.IOutput)
+              metadata:
+                message.content.metadata,
+            })
+          }
           break
 
         case 'error':
-          outputs.push({
-            output_type: 'error',
+          if (
+            KernelMessage.isErrorMsg(
+              message,
+            )
+          ) {
+            outputs.push({
+              output_type: 'error',
 
-            ename:
-              content.ename,
+              ename:
+                message.content.ename,
 
-            evalue:
-              content.evalue,
+              evalue:
+                message.content.evalue,
 
-            traceback:
-              content.traceback,
-          } as nbformat.IOutput)
+              traceback:
+                message.content.traceback,
+            })
+          }
           break
 
         case 'clear_output':
