@@ -14,7 +14,17 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import BigInteger, DateTime, Integer, Text, TypeDecorator, update
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Integer,
+    Text,
+    TypeDecorator,
+    and_,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -24,6 +34,7 @@ from .base import (
     CreateOutcome,
     IdempotencyReplay,
     NotebookRow,
+    NotebookSummaryRow,
     RevisionRow,
     SaveOutcome,
 )
@@ -94,6 +105,16 @@ def _notebook_row(model: NotebookModel) -> NotebookRow:
         title=model.title,
         current_revision=model.current_revision,
         current_content_hash=model.current_content_hash,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def _summary_row(model: NotebookModel) -> NotebookSummaryRow:
+    return NotebookSummaryRow(
+        notebook_id=model.id,
+        title=model.title,
+        current_revision=model.current_revision,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -250,6 +271,49 @@ class SqlAlchemyNotebookRepository:
                 NotebookRevisionModel, (notebook_id, revision)
             )
             return _revision_row(model) if model is not None else None
+        except OperationalError as error:
+            raise StorageUnavailable("database") from error
+        finally:
+            session.close()
+
+    # -- list ------------------------------------------------------------
+
+    def list_notebooks(
+        self,
+        *,
+        limit: int,
+        cursor_updated_at: datetime | None = None,
+        cursor_notebook_id: str | None = None,
+    ) -> list[NotebookSummaryRow]:
+        """keyset 分页：updated_at DESC, id DESC，返回 limit + 1 条。
+
+        只查询 notebooks metadata 表；不读取 revision 行或 Blob。
+        cursor 条件与排序字段严格一致：
+
+            WHERE updated_at < :cursor_updated_at
+               OR (updated_at = :cursor_updated_at AND id < :cursor_notebook_id)
+        """
+        session = self.session_factory()
+        try:
+            stmt = select(NotebookModel).limit(limit + 1)
+            if cursor_updated_at is not None or cursor_notebook_id is not None:
+                # 两者要么同时给、要么都不给（service 保证）；防御性校验。
+                if cursor_updated_at is None or cursor_notebook_id is None:
+                    raise ValueError("cursor 参数必须成对提供")
+                stmt = stmt.where(
+                    or_(
+                        NotebookModel.updated_at < cursor_updated_at,
+                        and_(
+                            NotebookModel.updated_at == cursor_updated_at,
+                            NotebookModel.id < cursor_notebook_id,
+                        ),
+                    )
+                )
+            stmt = stmt.order_by(
+                NotebookModel.updated_at.desc(), NotebookModel.id.desc()
+            )
+            models = session.execute(stmt).scalars().all()
+            return [_summary_row(model) for model in models]
         except OperationalError as error:
             raise StorageUnavailable("database") from error
         finally:

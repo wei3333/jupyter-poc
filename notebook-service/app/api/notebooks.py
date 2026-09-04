@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Path, Request
+from fastapi import APIRouter, Depends, Header, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..errors import MalformedJson
@@ -18,6 +18,8 @@ from ..schemas import (
     NOTEBOOK_ID_PATTERN,
     CreateNotebookRequest,
     NotebookDocumentResponse,
+    NotebookListResponse,
+    NotebookSummary,
     SaveNotebookRequest,
     SaveNotebookResponse,
 )
@@ -87,6 +89,18 @@ SAVE_RESPONSES = {
     409: error_docs("Revision 冲突或幂等键被用于不同请求"),
     413: error_docs("请求体或 Notebook 内容超过部署限制"),
     422: error_docs(_INVALID_REQUEST_OR_NOTEBOOK),
+    500: error_docs("未预期的服务内部错误"),
+    503: error_docs("Notebook 持久化依赖暂时不可用", retry_after=True),
+}
+
+LIST_RESPONSES = {
+    200: success_docs(
+        "Notebook 列表；没有数据时返回空 items",
+        NotebookListResponse,
+        headers=REQUEST_ID_HEADER,
+    ),
+    400: error_docs("分页 cursor 无法解析或不符合当前 cursor 版本"),
+    422: error_docs("请求字段、路径参数或请求头不符合契约"),
     500: error_docs("未预期的服务内部错误"),
     503: error_docs("Notebook 持久化依赖暂时不可用", retry_after=True),
 }
@@ -162,6 +176,34 @@ def _document_response(
         headers=headers or {},
         content=payload.model_dump(mode="json"),
     )
+
+
+@router.get(
+    "/api/v1/notebooks",
+    operation_id="listNotebooks",
+    response_model=NotebookListResponse,
+    responses=LIST_RESPONSES,
+)
+def list_notebooks(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    cursor: Annotated[str | None, Query(min_length=1)] = None,
+):
+    result = _service(request).list(limit=limit, cursor=cursor)
+    payload = NotebookListResponse(
+        items=[
+            NotebookSummary(
+                notebookId=row.notebook_id,
+                title=row.title,
+                revision=row.current_revision,
+                createdAt=row.created_at,
+                updatedAt=row.updated_at,
+            )
+            for row in result.items
+        ],
+        nextCursor=result.next_cursor,
+    )
+    return JSONResponse(status_code=200, content=payload.model_dump(mode="json"))
 
 
 @router.post(

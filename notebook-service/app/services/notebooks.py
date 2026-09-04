@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from ..cursors import decode_cursor, encode_cursor
 from ..errors import (
     IdempotencyKeyReused,
     InternalError,
@@ -30,7 +31,11 @@ from ..nbformat_codec import (
     sha256_hex,
     validate_for_save,
 )
-from ..repositories.base import NotebookRepository, RevisionRow
+from ..repositories.base import (
+    NotebookRepository,
+    NotebookSummaryRow,
+    RevisionRow,
+)
 from ..storage.base import BlobNotFoundError, BlobStore
 
 logger = logging.getLogger("notebook_service")
@@ -78,6 +83,12 @@ class SaveResult:
     updated_at: datetime
     unchanged: bool
     etag: str
+
+
+@dataclass(frozen=True)
+class ListResult:
+    items: list[NotebookSummaryRow]
+    next_cursor: str | None
 
 
 class NotebookService:
@@ -248,6 +259,29 @@ class NotebookService:
             content=content,
             etag=etag,
         )
+
+    # -- list ------------------------------------------------------------
+
+    def list(self, limit: int, cursor: str | None) -> ListResult:
+        """列出 Notebook metadata 摘要（updated_at DESC, id DESC 固定排序）。
+
+        - cursor 由本服务签发，客户端透传；解码失败抛 InvalidCursor（400）；
+        - repository 查询 limit + 1 条，这里截断为 limit 条；
+        - 多出一条时用最后一条返回记录生成 nextCursor，否则为 null；
+        - 本路径不读取 BlobStore，不返回 content/contentHash。
+        """
+        cursor_value = decode_cursor(cursor) if cursor else None
+        rows = self.repository.list_notebooks(
+            limit=limit,
+            cursor_updated_at=cursor_value.updated_at if cursor_value else None,
+            cursor_notebook_id=cursor_value.notebook_id if cursor_value else None,
+        )
+        items = rows[:limit]
+        next_cursor = None
+        if len(rows) > limit:
+            last = items[-1]
+            next_cursor = encode_cursor(last.updated_at, last.notebook_id)
+        return ListResult(items=items, next_cursor=next_cursor)
 
     # -- save ------------------------------------------------------------
 

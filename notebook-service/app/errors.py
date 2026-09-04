@@ -32,6 +32,12 @@ class MalformedJson(DomainError):
     default_message = "Request body is not valid JSON"
 
 
+class InvalidCursor(DomainError):
+    code = "INVALID_CURSOR"
+    http_status = 400
+    default_message = "Pagination cursor is invalid"
+
+
 class InvalidRequest(DomainError):
     code = "INVALID_REQUEST"
     http_status = 422

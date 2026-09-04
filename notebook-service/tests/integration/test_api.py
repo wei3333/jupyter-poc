@@ -496,3 +496,161 @@ def test_error_response_does_not_leak_internals(quiet_client, monkeypatch, conte
     assert "/secret" not in str(response.json())
     assert "SELECT" not in str(response.json())
     assert envelope["requestId"] == response.headers["x-request-id"]
+
+
+# -- 列表（NS-D1-LIST） -----------------------------------------------------------
+
+import base64 as _base64
+import json as _json
+
+
+def _list(client, **params):
+    filtered = {k: v for k, v in params.items() if v is not None}
+    return client.get("/api/v1/notebooks", params=filtered or None)
+
+
+def _create_many(client, count):
+    ids = []
+    for i in range(count):
+        response = _post(client, body={"title": f"nb-{i}"}, key=f"list-create-{i}")
+        assert response.status_code == 201, response.text
+        ids.append(response.json()["notebookId"])
+    return ids
+
+
+def test_list_empty(client):
+    response = _list(client)
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "nextCursor": None}
+    assert response.headers["x-request-id"]
+
+
+def test_list_item_fields_are_exactly_the_contract_set(client):
+    _create_many(client, 1)
+    item = _list(client).json()["items"][0]
+    assert set(item) == {"notebookId", "title", "revision", "createdAt", "updatedAt"}
+    assert item["revision"] == 1
+    assert item["createdAt"].endswith("Z")
+    assert item["updatedAt"].endswith("Z")
+
+
+def test_list_does_not_return_content_or_content_hash(client):
+    _create_many(client, 1)
+    body = _list(client).json()
+    assert set(body) == {"items", "nextCursor"}
+    for item in body["items"]:
+        assert "content" not in item
+        assert "contentHash" not in item
+
+
+def test_list_default_limit_is_20(client):
+    _create_many(client, 25)
+    page1 = _list(client).json()
+    assert len(page1["items"]) == 20
+    assert page1["nextCursor"] is not None
+
+    page2 = _list(client, cursor=page1["nextCursor"]).json()
+    assert len(page2["items"]) == 5
+    assert page2["nextCursor"] is None
+
+
+def test_list_limit_boundaries(client):
+    _create_many(client, 3)
+    assert len(_list(client, limit=1).json()["items"]) == 1
+    assert len(_list(client, limit=100).json()["items"]) == 3
+
+
+@pytest.mark.parametrize("limit", [0, 101, -1])
+def test_list_limit_out_of_range_rejected(client, limit):
+    response = _list(client, limit=limit)
+    _assert_error_envelope(response, "INVALID_REQUEST", status=422)
+
+
+def test_list_limit_non_integer_rejected(client):
+    response = _list(client, limit="abc")
+    _assert_error_envelope(response, "INVALID_REQUEST", status=422)
+
+
+def test_list_orders_by_updated_at_desc(client):
+    # 创建三个后保存最早的那个，使其 updatedAt 变为最新
+    created = _create_many(client, 3)
+    newest_after_save = created[0]
+    content = make_notebook([make_code_cell("c1", source="x=1")])
+    assert _put(client, newest_after_save, 1, content, key="order-save").status_code == 200
+
+    ordered = [item["notebookId"] for item in _list(client).json()["items"]]
+    assert ordered[0] == newest_after_save
+    # 其余两个保持创建顺序（后创建者 updatedAt 更大）
+    assert ordered[1:] == [created[2], created[1]]
+
+
+def test_list_pagination_walk_collects_all_without_duplicates(client):
+    all_ids = set(_create_many(client, 5))
+    collected = []
+    cursor = None
+    for _ in range(10):  # 防御性上限
+        page = _list(client, limit=2, cursor=cursor).json()
+        collected.extend(item["notebookId"] for item in page["items"])
+        cursor = page["nextCursor"]
+        if cursor is None:
+            break
+    assert len(collected) == 5
+    assert len(set(collected)) == 5
+    assert set(collected) == all_ids
+
+
+def test_list_pages_are_disjoint_and_ordered(client):
+    _create_many(client, 6)
+    page1 = _list(client, limit=2).json()
+    page2 = _list(client, limit=2, cursor=page1["nextCursor"]).json()
+    page1_ids = {item["notebookId"] for item in page1["items"]}
+    page2_ids = {item["notebookId"] for item in page2["items"]}
+    assert page1_ids.isdisjoint(page2_ids)
+
+
+@pytest.mark.parametrize("cursor", [
+    "!!!",
+    "abc def",
+    _base64.urlsafe_b64encode(b"not json").decode(),
+    _base64.urlsafe_b64encode(_json.dumps({"v": 2, "updatedAt": "2026-09-04T05:08:00Z", "notebookId": "nb_" + "a" * 32}).encode()).decode(),
+    _base64.urlsafe_b64encode(_json.dumps({"v": 1, "updatedAt": "not-a-time", "notebookId": "nb_" + "a" * 32}).encode()).decode(),
+    _base64.urlsafe_b64encode(_json.dumps({"v": 1, "updatedAt": "2026-09-04T05:08:00Z", "notebookId": "not-an-id"}).encode()).decode(),
+    _base64.urlsafe_b64encode(_json.dumps({"v": 1, "updatedAt": "2026-09-04T05:08:00Z"}).encode()).decode(),
+])
+def test_list_invalid_cursor_returns_400(client, cursor):
+    response = _list(client, cursor=cursor)
+    envelope = _assert_error_envelope(response, "INVALID_CURSOR", status=400)
+    assert envelope["requestId"] == response.headers["x-request-id"]
+
+
+def test_list_empty_cursor_rejected_as_invalid_request(client):
+    # ListCursor schema minLength: 1 → 参数校验失败
+    response = _list(client, cursor="")
+    _assert_error_envelope(response, "INVALID_REQUEST", status=422)
+
+
+def test_list_valid_cursor_beyond_tail(client):
+    _create_many(client, 1)
+
+    # keyset DESC：指向比所有行更早位置的合法 cursor → 200 空页（透传语义）
+    from app.cursors import encode_cursor
+    from datetime import datetime, timezone
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    cursor = encode_cursor(past, "nb_" + "z" * 32)
+    page = _list(client, cursor=cursor)
+    assert page.status_code == 200
+    assert page.json() == {"items": [], "nextCursor": None}
+
+
+def test_list_revision_reflects_current_head(client):
+    nb_id = _create_many(client, 1)[0]
+    content = make_notebook([make_code_cell("c1", source="x=1")])
+    _put(client, nb_id, 1, content, key="rev-save")
+    item = _list(client).json()["items"][0]
+    assert item["revision"] == 2
+
+
+def test_list_no_collection_etag(client):
+    _create_many(client, 1)
+    response = _list(client)
+    assert "etag" not in response.headers

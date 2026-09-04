@@ -70,6 +70,25 @@ class SaveNotebookResponse(_ContractModel):
         return _utc_z(value)
 
 
+class NotebookSummary(_ContractModel):
+    """列表项：只含 notebooks metadata，不返回 content/contentHash。"""
+
+    notebookId: NotebookId
+    title: str
+    revision: Revision
+    createdAt: datetime
+    updatedAt: datetime
+
+    @field_serializer("createdAt", "updatedAt")
+    def _serialize_dt(self, value: datetime) -> str:
+        return _utc_z(value)
+
+
+class NotebookListResponse(_ContractModel):
+    items: list[NotebookSummary]
+    nextCursor: str | None
+
+
 class HealthResponse(_ContractModel):
     status: Literal["ok"]
 

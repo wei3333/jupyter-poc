@@ -338,6 +338,19 @@ def _new_notebook(client):
 
 
 ERROR_CASES = [
+    # -- GET /api/v1/notebooks（列表）--
+    ("LIST 400 INVALID_CURSOR",
+     lambda c, ctx: c.get("/api/v1/notebooks", params={"cursor": "!!not-base64!!"}),
+     "INVALID_CURSOR", 400, "list"),
+    ("LIST 422 INVALID_REQUEST",
+     lambda c, ctx: c.get("/api/v1/notebooks", params={"limit": 0}),
+     "INVALID_REQUEST", 422, "list"),
+    ("LIST 500 INTERNAL_ERROR",
+     lambda c, ctx: _boom(ctx, "list") or c.get("/api/v1/notebooks"),
+     "INTERNAL_ERROR", 500, "list"),
+    ("LIST 503 STORAGE_UNAVAILABLE",
+     lambda c, ctx: _list_db_down(ctx) or c.get("/api/v1/notebooks"),
+     "STORAGE_UNAVAILABLE", 503, "list"),
     # -- POST /api/v1/notebooks --
     ("POST 400 MALFORMED_JSON",
      lambda c, ctx: c.post("/api/v1/notebooks", content=b"{", headers={"Idempotency-Key": "k", "Content-Type": "application/json"}),
@@ -432,8 +445,19 @@ def _boom(context, method):
 
     if method == "create":
         context.service.create = raise_runtime
+    elif method == "list":
+        context.service.list = raise_runtime
     else:
         context.service.save = raise_runtime
+
+
+def _list_db_down(context):
+    from app.errors import StorageUnavailable
+
+    def failing_list(**kwargs):
+        raise StorageUnavailable("database")
+
+    context.repository.list_notebooks = failing_list
 
 
 def _blob_down(context):
@@ -532,6 +556,7 @@ def test_error_cases_cover_all_declared_errors(contract):
                 declared.add((op_id, int(status)))
     # operationId 映射到上面的 op 标签
     label_map = {
+        "listNotebooks": "list",
         "createNotebook": "post",
         "getNotebook": "get",
         "saveNotebook": "put",

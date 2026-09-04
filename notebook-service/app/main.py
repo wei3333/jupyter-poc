@@ -59,7 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     blob_store = LocalBlobStore(settings.blob_root)
     service = NotebookService(repository, blob_store)
 
-    app = FastAPI(title="Notebook Service API", version="1.0.0-draft.1")
+    app = FastAPI(title="Notebook Service API", version="1.0.0-draft.2")
     app.state.context = AppContext(
         settings=settings,
         engine=engine,

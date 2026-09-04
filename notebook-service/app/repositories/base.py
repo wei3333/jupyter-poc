@@ -21,6 +21,17 @@ class NotebookRow:
 
 
 @dataclass(frozen=True)
+class NotebookSummaryRow:
+    """列表项：只含 notebooks metadata，不读取 revision 行或 Blob。"""
+
+    notebook_id: str
+    title: str
+    current_revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class RevisionRow:
     notebook_id: str
     revision: int
@@ -88,6 +99,22 @@ class NotebookRepository(Protocol):
     def get_revision(
         self, notebook_id: str, revision: int
     ) -> RevisionRow | None:
+        ...
+
+    def list_notebooks(
+        self,
+        *,
+        limit: int,
+        cursor_updated_at: datetime | None = None,
+        cursor_notebook_id: str | None = None,
+    ) -> list[NotebookSummaryRow]:
+        """keyset 分页：按 updated_at DESC, id DESC 查询 limit + 1 条。
+
+        - 只读 notebooks metadata；禁止读取 revision 行、Blob 或计算 content hash；
+        - cursor_updated_at/cursor_notebook_id 为解码后的 cursor 值，两者要么
+          同时为 None（第一页），要么同时给定；
+        - 返回 limit + 1 条，由 service 截断并生成 nextCursor。
+        """
         ...
 
     def save_notebook(

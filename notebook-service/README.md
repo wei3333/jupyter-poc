@@ -11,6 +11,7 @@ nbformat 4 文档并全量保存；Runtime、Jupyter Server、Session、Kernel �
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| `GET` | `/api/v1/notebooks` | 列出 Notebook metadata 摘要（`updatedAt DESC, notebookId DESC` 固定排序，keyset cursor 分页，不读取 Blob） |
 | `POST` | `/api/v1/notebooks` | 创建 Notebook（revision 1），创建阶段规范化缺失/重复 Cell ID |
 | `GET` | `/api/v1/notebooks/{notebookId}` | 读取最新 revision（支持 `If-None-Match` → 304） |
 | `PUT` | `/api/v1/notebooks/{notebookId}` | 全量保存（`baseRevision` 乐观并发，严格 nbformat 校验） |
@@ -101,7 +102,7 @@ NS-C1 只承诺**单台机器**上的正确性：
 - Metadata：SQLite；Content Blob：本地文件系统；
 - 可使用同一台机器上的多个 Uvicorn worker；
 - **不支持多节点**、高可用或云存储；
-- 尚未支持：认证/ACL、列表/目录/删除、重命名、快照、版本列表、配额、
+- 尚未支持：认证/ACL、目录/删除、重命名、快照、版本列表、配额、
   幂等记录清理、Blob GC。
 
 SQLite 和本地 Blob 只是接口实现，不渗透到 API 层或 domain service；后续替换为

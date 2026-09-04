@@ -38,24 +38,25 @@ def _nb_id():
 def _create(
     repo,
     *,
-    key="create-key",
+    key=None,
     request_hash="req-hash",
     notebook_id=None,
     title="My Notebook",
     content_hash="sha256:" + "1" * 64,
     blob_key=None,
     size_bytes=100,
+    now=None,
 ):
     return repo.create_notebook(
         scope=CREATE_SCOPE,
-        key=key,
+        key=key if key is not None else f"create-{uuid.uuid4().hex}",
         request_hash=request_hash,
         notebook_id=notebook_id or _nb_id(),
         title=title,
         content_hash=content_hash,
         blob_key=blob_key or f"sha256/11/{'1' * 64}.ipynb",
         size_bytes=size_bytes,
-        now=_now(),
+        now=now if now is not None else _now(),
     )
 
 
@@ -189,6 +190,7 @@ def _save(
     content_hash="sha256:" + "2" * 64,
     blob_key=None,
     size_bytes=100,
+    now=None,
 ):
     return repo.save_notebook(
         scope=SAVE_SCOPE,
@@ -199,7 +201,7 @@ def _save(
         content_hash=content_hash,
         blob_key=blob_key or f"sha256/22/{'2' * 64}.ipynb",
         size_bytes=size_bytes,
-        now=_now(),
+        now=now if now is not None else _now(),
     )
 
 
@@ -372,3 +374,111 @@ def test_create_failure_rolls_back_all_rows(engine, repo):
     assert _count(engine, "notebooks") == 0
     assert _count(engine, "notebook_revisions") == 0
     assert _count(engine, "idempotency_records") == 0
+
+
+# -- 列表（NS-D1-LIST） -----------------------------------------------------------
+
+
+def _fixed_time(hour: int) -> datetime:
+    return datetime(2026, 9, 4, hour, 0, 0, tzinfo=timezone.utc)
+
+
+def test_list_empty(repo):
+    assert repo.list_notebooks(limit=20) == []
+
+
+def test_list_orders_by_updated_at_desc_then_id_desc(engine, repo):
+    a = _create(repo, notebook_id="nb_" + "a" * 32, now=_fixed_time(5))
+    b = _create(repo, notebook_id="nb_" + "b" * 32, now=_fixed_time(7))
+    c = _create(repo, notebook_id="nb_" + "c" * 32, now=_fixed_time(6))
+
+    rows = repo.list_notebooks(limit=20)
+    assert [r.notebook_id for r in rows] == [b.notebook.id, c.notebook.id, a.notebook.id]
+
+
+def test_list_stable_tiebreak_by_id_desc_when_updated_at_equal(engine, repo):
+    t = _fixed_time(5)
+    high = _create(repo, notebook_id="nb_" + "c" * 32, now=t)
+    low = _create(repo, notebook_id="nb_" + "a" * 32, now=t)
+    mid = _create(repo, notebook_id="nb_" + "b" * 32, now=t)
+
+    rows = repo.list_notebooks(limit=20)
+    assert [r.notebook_id for r in rows] == [
+        high.notebook.id, mid.notebook.id, low.notebook.id,
+    ]
+
+
+def test_list_returns_limit_plus_one_rows(engine, repo):
+    for hour in range(3):
+        _create(repo, notebook_id=f"nb_{'f' * 31}{hour}", now=_fixed_time(hour))
+    rows = repo.list_notebooks(limit=2)
+    assert len(rows) == 3  # limit + 1
+
+
+def test_list_cursor_filters_older_rows(engine, repo):
+    old = _create(repo, notebook_id="nb_" + "a" * 32, now=_fixed_time(5))
+    mid = _create(repo, notebook_id="nb_" + "b" * 32, now=_fixed_time(6))
+    _create(repo, notebook_id="nb_" + "c" * 32, now=_fixed_time(7))
+
+    rows = repo.list_notebooks(
+        limit=20,
+        cursor_updated_at=_fixed_time(6),
+        cursor_notebook_id=mid.notebook.id,
+    )
+    # 只返回严格早于 cursor 的行（相同 updated_at 时要求 id 更小）
+    assert [r.notebook_id for r in rows] == [old.notebook.id]
+
+
+def test_list_cursor_same_updated_at_smaller_id_included(engine, repo):
+    t = _fixed_time(5)
+    high = _create(repo, notebook_id="nb_" + "c" * 32, now=t)
+    mid = _create(repo, notebook_id="nb_" + "b" * 32, now=t)
+    low = _create(repo, notebook_id="nb_" + "a" * 32, now=t)
+
+    # cursor 指向中间记录：只返回相同 updated_at 且 id 更小的记录
+    rows = repo.list_notebooks(
+        limit=20, cursor_updated_at=t, cursor_notebook_id=mid.notebook.id,
+    )
+    assert [r.notebook_id for r in rows] == [low.notebook.id]
+    assert high.notebook.id not in [r.notebook_id for r in rows]
+
+
+def test_list_cursor_exact_values_exclude_self(engine, repo):
+    t = _fixed_time(5)
+    _create(repo, notebook_id="nb_" + "a" * 32, now=t)
+
+    rows = repo.list_notebooks(
+        limit=20, cursor_updated_at=t, cursor_notebook_id="nb_" + "a" * 32,
+    )
+    assert rows == []
+
+
+def test_list_reflects_save_updated_at(engine, repo):
+    nb_id = _create(repo, content_hash="sha256:" + "1" * 64, now=_fixed_time(5)).notebook.id
+    later = _fixed_time(9)
+    _save(
+        repo, nb_id, key="s1", request_hash="rh1", base_revision=1,
+        content_hash="sha256:" + "2" * 64, now=later,
+    )
+
+    rows = repo.list_notebooks(limit=20)
+    assert rows[0].notebook_id == nb_id
+    assert rows[0].updated_at == later
+    assert rows[0].current_revision == 2
+
+
+def test_list_summary_rows_only_metadata_fields(engine, repo):
+    outcome = _create(repo, title="Summary", now=_fixed_time(5))
+    row = repo.list_notebooks(limit=20)[0]
+    assert row.notebook_id == outcome.notebook.id
+    assert row.title == "Summary"
+    assert row.current_revision == 1
+    assert row.created_at == _fixed_time(5)
+    assert row.updated_at == _fixed_time(5)
+
+
+def test_list_requires_paired_cursor_arguments(repo):
+    with pytest.raises(ValueError):
+        repo.list_notebooks(limit=20, cursor_updated_at=_fixed_time(5))
+    with pytest.raises(ValueError):
+        repo.list_notebooks(limit=20, cursor_notebook_id="nb_" + "a" * 32)
