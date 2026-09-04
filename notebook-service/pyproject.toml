@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notebook-service"
+version = "0.1.0"
+description = "Notebook Service v1 (NS-C1): notebook document plane with revision CAS, idempotent writes and content-addressed blobs"
+requires-python = ">=3.11"
+# 精确锁定直接依赖；完整传递依赖锁定见 requirements.lock.txt（由干净环境
+# `pip install --dry-run --report` 生成）。
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+    "pydantic==2.13.5",
+    "nbformat==5.11.1",
+    "SQLAlchemy==2.0.52",
+    "alembic==1.19.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "httpx==0.28.1",
+    "openapi-spec-validator==0.9.0",
+    "PyYAML==6.0.3",
+]
+
+[tool.setuptools]
+packages = ["app", "app.api", "app.services", "app.repositories", "app.storage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]

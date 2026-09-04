@@ -22,13 +22,18 @@
 - 维护 revision
 - 作为 notebook authoritative state（权威状态）
 
-`notebook-service/app/main.py`核心内容：
+当前提供两套 route：
 
-- `POST /api/notebooks`
-- `GET /api/notebooks/{notebook_id}`
-- `PUT /api/notebooks/{notebook_id}`
+- **v1（正式开发基础）**：`POST /api/v1/notebooks`、`GET /api/v1/notebooks/{notebookId}`、
+  `PUT /api/v1/notebooks/{notebookId}`、`GET /api/v1/notebooks/{notebookId}/revisions/{revision}`，
+  以及 `/health/live`、`/health/ready`。基于 SQLite（metadata）+ content-addressed
+  Blob（`data/v1/`），支持 revision CAS、幂等、ETag/条件读取、统一错误 envelope。
+  契约见 [docs/api/notebook-service-v1.openapi.yaml](docs/api/notebook-service-v1.openapi.yaml)。
+- **旧 POC route（过渡期兼容入口）**：`POST/GET/PUT /api/notebooks` 原样保留，
+  继续使用 `data/notebooks/`，不出现在 v1 OpenAPI 中。**两套 route 暂不互通**，
+  新前端和新测试不得调用旧 route。
 
-`LocalNotebookRepository(DATA_DIR)` 负责底层存储，`DATA_DIR` 指向 `data/notebooks`
+启动、配置与限制详见 [notebook-service/README.md](notebook-service/README.md)。
 
 
 ## Runtime Service

@@ -1,8 +1,10 @@
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 notebook-service/.venv/
+docs/
 
 # Runtime test data
 notebook-service/data/
