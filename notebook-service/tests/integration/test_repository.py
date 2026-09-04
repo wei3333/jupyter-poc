@@ -482,3 +482,134 @@ def test_list_requires_paired_cursor_arguments(repo):
         repo.list_notebooks(limit=20, cursor_updated_at=_fixed_time(5))
     with pytest.raises(ValueError):
         repo.list_notebooks(limit=20, cursor_notebook_id="nb_" + "a" * 32)
+
+
+# -- 删除（NS-D1-DELETE） ---------------------------------------------------------
+
+
+def _delete(repo, notebook_id, now=None):
+    return repo.delete_notebook(
+        notebook_id=notebook_id,
+        now=now if now is not None else _now(),
+    )
+
+
+def test_delete_sets_deleted_at_only(engine, repo):
+    outcome = _create(repo, content_hash="sha256:" + "1" * 64)
+    nb_id = outcome.notebook.id
+    before = repo.get_notebook(nb_id)
+
+    delete_now = _now()
+    result = _delete(repo, nb_id, now=delete_now)
+    assert result.kind == "deleted"
+
+    after = repo.get_notebook(nb_id)
+    assert after.deleted_at == delete_now
+    assert after.deleted_at.tzinfo is not None
+    # 软删除不推进 revision、不改 head hash/updated_at
+    assert after.current_revision == before.current_revision
+    assert after.current_content_hash == before.current_content_hash
+    assert after.updated_at == before.updated_at
+    assert after.created_at == before.created_at
+    # revision 行保留
+    assert repo.get_revision(nb_id, 1) is not None
+    assert _count(engine, "notebook_revisions") == 1
+
+
+def test_delete_repeat_returns_already_deleted(engine, repo):
+    nb_id = _create(repo).notebook.id
+    assert _delete(repo, nb_id).kind == "deleted"
+    second = _delete(repo, nb_id)
+    assert second.kind == "already_deleted"
+    # 第二次删除不覆盖 deleted_at
+    row = repo.get_notebook(nb_id)
+    assert row.deleted_at is not None
+
+
+def test_delete_nonexistent_returns_not_found(repo):
+    assert _delete(repo, _nb_id()).kind == "not_found"
+
+
+def test_list_excludes_deleted_notebooks(engine, repo):
+    keep_old = _create(
+        repo, notebook_id="nb_" + "a" * 32, now=_fixed_time(5)
+    ).notebook.id
+    keep_new = _create(
+        repo, notebook_id="nb_" + "b" * 32, now=_fixed_time(6)
+    ).notebook.id
+    removed = _create(
+        repo, notebook_id="nb_" + "c" * 32, now=_fixed_time(7)
+    ).notebook.id
+    _delete(repo, removed)
+
+    rows = repo.list_notebooks(limit=20)
+    assert [r.notebook_id for r in rows] == [keep_new, keep_old]
+    # 分页 cursor 查询同样排除已删除（repository 返回 limit+1 条）
+    page1 = repo.list_notebooks(limit=1)
+    assert [r.notebook_id for r in page1] == [keep_new, keep_old]
+    page2 = repo.list_notebooks(
+        limit=1,
+        cursor_updated_at=page1[0].updated_at,
+        cursor_notebook_id=page1[0].notebook_id,
+    )
+    assert [r.notebook_id for r in page2] == [keep_old]
+
+
+def test_save_new_key_on_deleted_returns_not_found(engine, repo):
+    nb_id = _create(repo, content_hash="sha256:" + "1" * 64).notebook.id
+    _delete(repo, nb_id)
+
+    outcome = _save(repo, nb_id, key="s1", request_hash="rh1", base_revision=1)
+    assert outcome.kind == "not_found"
+    # head 未被移动
+    assert repo.get_notebook(nb_id).current_revision == 1
+    assert _count(engine, "notebook_revisions") == 1
+
+
+def test_save_idempotent_replay_on_deleted_still_replays(engine, repo):
+    """既有幂等记录不因删除改写；相同幂等请求仍重放原成功结果。"""
+    nb_id = _create(repo, content_hash="sha256:" + "1" * 64).notebook.id
+    first = _save(
+        repo, nb_id, key="s1", request_hash="rh1", base_revision=1,
+        content_hash="sha256:" + "2" * 64,
+    )
+    assert first.kind == "saved"
+    _delete(repo, nb_id)
+
+    replay = _save(
+        repo, nb_id, key="s1", request_hash="rh1", base_revision=1,
+        content_hash="sha256:" + "2" * 64,
+    )
+    assert replay.kind == "replayed"
+    assert replay.replay.revision == 2
+    assert _count(engine, "notebook_revisions") == 2
+
+
+def test_delete_db_failure_rolls_back(engine, repo, monkeypatch):
+    """删除事务失败：deleted_at 不落库，返回 StorageUnavailable。"""
+    from sqlalchemy.exc import OperationalError
+
+    nb_id = _create(repo).notebook.id
+
+    real_factory = repo.session_factory
+
+    class FailingCommitSession:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def commit(self):
+            raise OperationalError("COMMIT", {}, Exception("simulated"))
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def failing_factory():
+        return FailingCommitSession(real_factory())
+
+    monkeypatch.setattr(repo, "session_factory", failing_factory)
+
+    from app.errors import StorageUnavailable
+    with pytest.raises(StorageUnavailable):
+        _delete(repo, nb_id)
+
+    assert repo.get_notebook(nb_id).deleted_at is None

@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import text
 
 from app.database import build_engine, build_session_factory
+from app.repositories.base import DeleteOutcome, SaveOutcome
 from app.repositories.sqlalchemy import SqlAlchemyNotebookRepository
 
 CREATE_SCOPE = "anonymous:POST:/api/v1/notebooks"
@@ -167,3 +168,95 @@ def test_concurrent_creates_same_key_same_request_single_notebook(engine, repo):
             for o in outcomes
         }
         assert len(ids) == 1, results
+
+
+# -- 删除并发（NS-D1-DELETE） -------------------------------------------------------
+
+
+def _delete(repo, notebook_id):
+    return repo.delete_notebook(
+        notebook_id=notebook_id, now=datetime.now(timezone.utc)
+    )
+
+
+def test_concurrent_deletes_both_succeed_single_deleted_at(engine, repo):
+    """两个并发 DELETE：恰好一个 deleted、一个 already_deleted，deleted_at 只写一次。
+
+    每轮使用全新 Notebook，避免上一轮的删除影响下一轮。
+    """
+    for _ in range(ITERATIONS):
+        notebook_id = _create(repo, f"nb_{uuid.uuid4().hex}").notebook.id
+        results = _run_race([
+            lambda: _delete(repo, notebook_id),
+            lambda: _delete(repo, notebook_id),
+        ])
+        assert all(r[0] == "ok" for r in results), results
+        kinds = sorted(r[1].kind for r in results)
+        assert kinds == ["already_deleted", "deleted"], results
+
+        row = repo.get_notebook(notebook_id)
+        assert row.deleted_at is not None
+        assert row.current_revision == 1
+
+
+def test_concurrent_delete_and_put_never_resurrects(engine, repo):
+    """DELETE 与 PUT 并发：删除先提交时 PUT 必须失败，不得推进 head。"""
+    for _ in range(ITERATIONS):
+        notebook_id = _create(
+            repo, f"nb_{uuid.uuid4().hex}", content_hash="sha256:" + "1" * 64
+        ).notebook.id
+
+        results = _run_race([
+            lambda: _delete(repo, notebook_id),
+            lambda: _save(
+                repo, uuid.uuid4().hex, "rh-put", notebook_id, 1,
+                "sha256:" + "2" * 64,
+            ),
+        ])
+        assert all(r[0] == "ok" for r in results), results
+        outcomes = [r[1] for r in results if r[0] == "ok"]
+        delete_outcome = next(
+            o for o in outcomes if isinstance(o, DeleteOutcome)
+        )
+        save_outcome = next(o for o in outcomes if isinstance(o, SaveOutcome))
+
+        row = repo.get_notebook(notebook_id)
+        # 无论先后，删除最终生效
+        assert row.deleted_at is not None
+        assert delete_outcome.kind in {"deleted", "already_deleted"}
+
+        if save_outcome.kind == "not_found":
+            # 删除先提交：PUT 失败，head 未被推进
+            assert row.current_revision == 1
+            assert row.current_content_hash == "sha256:" + "1" * 64
+        elif save_outcome.kind == "saved":
+            # PUT 先提交：head 推进到 2，随后被软删除
+            assert row.current_revision == 2
+        else:  # pragma: no cover - 竞态外的异常路径
+            raise AssertionError(f"意外结果: {save_outcome.kind}")
+
+
+def test_puts_after_delete_all_fail(engine, repo):
+    """先删除，再并发 PUT：全部 404 语义（not_found），head 不推进、不复活。"""
+    notebook_id = _create(
+        repo, f"nb_{uuid.uuid4().hex}", content_hash="sha256:" + "1" * 64
+    ).notebook.id
+    assert _delete(repo, notebook_id).kind == "deleted"
+
+    results = _run_race([
+        lambda: _save(
+            repo, uuid.uuid4().hex, "rh-a", notebook_id, 1,
+            "sha256:" + "2" * 64,
+        ),
+        lambda: _save(
+            repo, uuid.uuid4().hex, "rh-b", notebook_id, 1,
+            "sha256:" + "3" * 64,
+        ),
+    ])
+    kinds = sorted(r[1].kind for r in results if r[0] == "ok")
+    assert kinds == ["not_found", "not_found"], results
+
+    row = repo.get_notebook(notebook_id)
+    assert row.deleted_at is not None
+    assert row.current_revision == 1
+    assert row.current_content_hash == "sha256:" + "1" * 64

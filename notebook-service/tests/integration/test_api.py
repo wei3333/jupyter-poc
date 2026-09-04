@@ -654,3 +654,143 @@ def test_list_no_collection_etag(client):
     _create_many(client, 1)
     response = _list(client)
     assert "etag" not in response.headers
+
+
+# -- 删除（NS-D1-DELETE） -----------------------------------------------------------
+
+
+def _delete(client, notebook_id):
+    return client.delete(f"/api/v1/notebooks/{notebook_id}")
+
+
+def test_delete_returns_204_no_body(client):
+    nb_id = _create_notebook(client).json()["notebookId"]
+    response = _delete(client, nb_id)
+    assert response.status_code == 204
+    assert response.content == b""
+    assert response.headers["x-request-id"]
+
+
+def test_delete_needs_no_headers_or_body(client):
+    # 不需要 Idempotency-Key、baseRevision、If-Match 或请求体
+    nb_id = _create_notebook(client).json()["notebookId"]
+    response = _delete(client, nb_id)
+    assert response.status_code == 204
+
+
+def test_delete_repeat_returns_204(client):
+    nb_id = _create_notebook(client).json()["notebookId"]
+    assert _delete(client, nb_id).status_code == 204
+    assert _delete(client, nb_id).status_code == 204
+
+
+def test_delete_nonexistent_returns_404(client):
+    response = _delete(client, "nb_" + "f" * 32)
+    envelope = _assert_error_envelope(response, "NOTEBOOK_NOT_FOUND", status=404)
+    assert envelope["details"]["notebookId"] == "nb_" + "f" * 32
+
+
+def test_delete_invalid_notebook_id_rejected(client):
+    response = _delete(client, "not-an-id")
+    _assert_error_envelope(response, "INVALID_REQUEST", status=422)
+
+
+def test_delete_hides_from_get_and_revision_get(client):
+    nb_id = _create_notebook(client).json()["notebookId"]
+    assert _delete(client, nb_id).status_code == 204
+
+    response = client.get(f"/api/v1/notebooks/{nb_id}")
+    _assert_error_envelope(response, "NOTEBOOK_NOT_FOUND", status=404)
+    response = client.get(f"/api/v1/notebooks/{nb_id}/revisions/1")
+    _assert_error_envelope(response, "NOTEBOOK_NOT_FOUND", status=404)
+
+
+def test_delete_blocks_new_put(client):
+    nb_id = _create_notebook(client).json()["notebookId"]
+    _delete(client, nb_id)
+
+    content = make_notebook([make_code_cell("c1", source="x=1")])
+    response = _put(client, nb_id, 1, content, key="save-after-delete")
+    _assert_error_envelope(response, "NOTEBOOK_NOT_FOUND", status=404)
+
+
+def test_delete_excludes_from_list(client):
+    keep = _create_notebook(client).json()["notebookId"]
+    removed = _create_notebook(client, key="create-2").json()["notebookId"]
+    _delete(client, removed)
+
+    listed = [item["notebookId"] for item in _list(client).json()["items"]]
+    assert listed == [keep]
+
+
+def test_delete_preserves_revision_hash_and_updated_at(client, context):
+    nb_id = _create_notebook(client).json()["notebookId"]
+    content = make_notebook([make_code_cell("c1", source="x=1")])
+    _put(client, nb_id, 1, content, key="before-delete")
+
+    from sqlalchemy import text
+    with context.engine.connect() as conn:
+        before = conn.execute(
+            text(
+                "SELECT current_revision, current_content_hash, updated_at"
+                " FROM notebooks WHERE id = :id"
+            ),
+            {"id": nb_id},
+        ).first()
+
+    assert _delete(client, nb_id).status_code == 204
+
+    with context.engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT current_revision, current_content_hash, updated_at,"
+                " deleted_at FROM notebooks WHERE id = :id"
+            ),
+            {"id": nb_id},
+        ).first()
+        # revision/hash/updatedAt 不变，仅 deleted_at 被设置
+        assert row.current_revision == before.current_revision
+        assert row.current_content_hash == before.current_content_hash
+        assert row.updated_at == before.updated_at
+        assert row.deleted_at is not None
+        # revision 行保留
+        count = conn.execute(
+            text(
+                "SELECT count(*) FROM notebook_revisions"
+                " WHERE notebook_id = :id"
+            ),
+            {"id": nb_id},
+        ).scalar()
+        assert count == 2
+    # Blob 保留
+    assert len(list((context.settings.blob_root).rglob("*.ipynb"))) >= 1
+
+
+def test_put_idempotent_replay_after_delete_returns_original_result(client):
+    """既有幂等记录不因删除改写；相同幂等请求仍重放原成功结果。"""
+    nb_id = _create_notebook(client).json()["notebookId"]
+    content1 = make_notebook([make_code_cell("c1", source="1")])
+    first = _put(client, nb_id, 1, content1, key="idem-save")
+    assert first.status_code == 200
+
+    _delete(client, nb_id)
+
+    replay = _put(client, nb_id, 1, content1, key="idem-save")
+    assert replay.status_code == 200
+    assert replay.json()["revision"] == 2
+    assert replay.headers["etag"] == first.headers["etag"]
+
+
+def test_delete_storage_unavailable(client, context, monkeypatch):
+    from app.errors import StorageUnavailable
+
+    nb_id = _create_notebook(client).json()["notebookId"]
+
+    def failing_delete(**kwargs):
+        raise StorageUnavailable("database")
+
+    monkeypatch.setattr(context.repository, "delete_notebook", failing_delete)
+    response = _delete(client, nb_id)
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
+    assert response.headers["retry-after"]

@@ -141,6 +141,10 @@ def test_legacy_routes_not_in_generated_schema(generated):
     assert "/api/notebooks/{notebook_id}" not in generated["paths"]
 
 
+def test_generated_info_version_matches_contract(contract, generated):
+    assert generated["info"]["version"] == contract["info"]["version"]
+
+
 def test_paths_methods_and_operation_ids_match(contract, generated):
     gen_paths = set(generated["paths"])
     con_paths = set(contract["paths"])
@@ -338,6 +342,19 @@ def _new_notebook(client):
 
 
 ERROR_CASES = [
+    # -- DELETE /api/v1/notebooks/{notebookId} --
+    ("DELETE 404 NOTEBOOK_NOT_FOUND",
+     lambda c, ctx: c.delete("/api/v1/notebooks/nb_" + "f" * 32),
+     "NOTEBOOK_NOT_FOUND", 404, "delete"),
+    ("DELETE 422 INVALID_REQUEST",
+     lambda c, ctx: c.delete("/api/v1/notebooks/not-an-id"),
+     "INVALID_REQUEST", 422, "delete"),
+    ("DELETE 500 INTERNAL_ERROR",
+     lambda c, ctx: _boom(ctx, "delete") or c.delete("/api/v1/notebooks/nb_" + "f" * 32),
+     "INTERNAL_ERROR", 500, "delete"),
+    ("DELETE 503 STORAGE_UNAVAILABLE",
+     lambda c, ctx: _delete_db_down(ctx) or c.delete("/api/v1/notebooks/nb_" + "f" * 32),
+     "STORAGE_UNAVAILABLE", 503, "delete"),
     # -- GET /api/v1/notebooks（列表）--
     ("LIST 400 INVALID_CURSOR",
      lambda c, ctx: c.get("/api/v1/notebooks", params={"cursor": "!!not-base64!!"}),
@@ -447,6 +464,8 @@ def _boom(context, method):
         context.service.create = raise_runtime
     elif method == "list":
         context.service.list = raise_runtime
+    elif method == "delete":
+        context.service.delete = raise_runtime
     else:
         context.service.save = raise_runtime
 
@@ -458,6 +477,15 @@ def _list_db_down(context):
         raise StorageUnavailable("database")
 
     context.repository.list_notebooks = failing_list
+
+
+def _delete_db_down(context):
+    from app.errors import StorageUnavailable
+
+    def failing_delete(**kwargs):
+        raise StorageUnavailable("database")
+
+    context.repository.delete_notebook = failing_delete
 
 
 def _blob_down(context):
@@ -560,6 +588,7 @@ def test_error_cases_cover_all_declared_errors(contract):
         "createNotebook": "post",
         "getNotebook": "get",
         "saveNotebook": "put",
+        "deleteNotebook": "delete",
         "getNotebookRevision": "get_revision",
         "getReadiness": "ready",
     }

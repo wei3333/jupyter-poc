@@ -26,6 +26,7 @@
 
 - **v1（正式开发基础）**：`GET /api/v1/notebooks`（列表）、`POST /api/v1/notebooks`、
   `GET /api/v1/notebooks/{notebookId}`、`PUT /api/v1/notebooks/{notebookId}`、
+  `DELETE /api/v1/notebooks/{notebookId}`（软删除）、
   `GET /api/v1/notebooks/{notebookId}/revisions/{revision}`，
   以及 `/health/live`、`/health/ready`。基于 SQLite（metadata）+ content-addressed
   Blob（`data/v1/`），支持 revision CAS、幂等、ETag/条件读取、统一错误 envelope。

@@ -93,6 +93,17 @@ SAVE_RESPONSES = {
     503: error_docs("Notebook 持久化依赖暂时不可用", retry_after=True),
 }
 
+DELETE_RESPONSES = {
+    204: {
+        "description": "Notebook 已删除或此前已经删除；无响应体",
+        "headers": REQUEST_ID_HEADER,
+    },
+    404: error_docs("Notebook 不存在"),
+    422: error_docs("请求字段、路径参数或请求头不符合契约"),
+    500: error_docs("未预期的服务内部错误"),
+    503: error_docs("Notebook 持久化依赖暂时不可用", retry_after=True),
+}
+
 LIST_RESPONSES = {
     200: success_docs(
         "Notebook 列表；没有数据时返回空 items",
@@ -281,6 +292,18 @@ def save_notebook(
         headers={"ETag": result.etag},
         content=payload.model_dump(mode="json"),
     )
+
+
+@router.delete(
+    "/api/v1/notebooks/{notebookId}",
+    operation_id="deleteNotebook",
+    status_code=204,
+    responses=DELETE_RESPONSES,
+)
+def delete_notebook(request: Request, notebookId: _NOTEBOOK_ID):
+    # 不需要请求体、Idempotency-Key、baseRevision 或 If-Match。
+    _service(request).delete(notebookId)
+    return Response(status_code=204)
 
 
 @router.get(

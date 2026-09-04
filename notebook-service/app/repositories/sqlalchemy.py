@@ -32,6 +32,7 @@ from ..errors import InternalError, StorageUnavailable
 from ..etags import format_etag
 from .base import (
     CreateOutcome,
+    DeleteOutcome,
     IdempotencyReplay,
     NotebookRow,
     NotebookSummaryRow,
@@ -71,6 +72,10 @@ class NotebookModel(Base):
     current_content_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    # NULL 表示正常，非 NULL 表示软删除。
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime, nullable=True
+    )
 
 
 class NotebookRevisionModel(Base):
@@ -107,6 +112,7 @@ def _notebook_row(model: NotebookModel) -> NotebookRow:
         current_content_hash=model.current_content_hash,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        deleted_at=model.deleted_at,
     )
 
 
@@ -288,6 +294,7 @@ class SqlAlchemyNotebookRepository:
         """keyset 分页：updated_at DESC, id DESC，返回 limit + 1 条。
 
         只查询 notebooks metadata 表；不读取 revision 行或 Blob。
+        已软删除记录不进入列表（deleted_at IS NULL）。
         cursor 条件与排序字段严格一致：
 
             WHERE updated_at < :cursor_updated_at
@@ -295,7 +302,9 @@ class SqlAlchemyNotebookRepository:
         """
         session = self.session_factory()
         try:
-            stmt = select(NotebookModel).limit(limit + 1)
+            stmt = select(NotebookModel).where(
+                NotebookModel.deleted_at.is_(None)
+            ).limit(limit + 1)
             if cursor_updated_at is not None or cursor_notebook_id is not None:
                 # 两者要么同时给、要么都不给（service 保证）；防御性校验。
                 if cursor_updated_at is None or cursor_notebook_id is None:
@@ -345,6 +354,10 @@ class SqlAlchemyNotebookRepository:
 
             notebook = session.get(NotebookModel, notebook_id)
             if notebook is None:
+                return SaveOutcome(kind="not_found")
+            if notebook.deleted_at is not None:
+                # 已软删除：新幂等键的 PUT 一律 404，不得复活。
+                # 幂等重放已在上面按原结果处理，不受删除影响。
                 return SaveOutcome(kind="not_found")
 
             if notebook.current_revision != base_revision:
@@ -398,11 +411,13 @@ class SqlAlchemyNotebookRepository:
             new_revision = notebook.current_revision + 1
 
             # CAS：条件 UPDATE，同事务内推进 head；无返回行说明并发失败。
+            # deleted_at IS NULL 防止与 DELETE 并发时复活已删除 Notebook。
             result = session.execute(
                 update(NotebookModel)
                 .where(
                     NotebookModel.id == notebook_id,
                     NotebookModel.current_revision == base_revision,
+                    NotebookModel.deleted_at.is_(None),
                 )
                 .values(
                     current_revision=new_revision,
@@ -415,6 +430,8 @@ class SqlAlchemyNotebookRepository:
                 # BEGIN IMMEDIATE 串行化下不应发生；防御性路径。
                 session.rollback()
                 current = session.get(NotebookModel, notebook_id)
+                if current is None or current.deleted_at is not None:
+                    return SaveOutcome(kind="not_found")
                 return SaveOutcome(
                     kind="revision_conflict",
                     current_revision=current.current_revision,
@@ -459,6 +476,34 @@ class SqlAlchemyNotebookRepository:
                     created_at=now,
                 ),
             )
+        except OperationalError as error:
+            session.rollback()
+            raise StorageUnavailable("database") from error
+        finally:
+            session.close()
+
+    # -- delete ----------------------------------------------------------
+
+    def delete_notebook(
+        self, *, notebook_id: str, now: datetime
+    ) -> DeleteOutcome:
+        """软删除：仅 SET deleted_at = now（同一写事务）。
+
+        - 从未存在：not_found；已有 deleted_at：already_deleted；
+        - 不推进 revision、不改 current_content_hash/updated_at；
+        - 不删除 revision 行或 Blob，不访问 BlobStore，不调用 Runtime Plane；
+        - 重复删除返回 already_deleted（HTTP 层同样 204，便于安全重试）。
+        """
+        session = self.session_factory()
+        try:
+            notebook = session.get(NotebookModel, notebook_id)
+            if notebook is None:
+                return DeleteOutcome(kind="not_found")
+            if notebook.deleted_at is not None:
+                return DeleteOutcome(kind="already_deleted")
+            notebook.deleted_at = now
+            session.commit()
+            return DeleteOutcome(kind="deleted")
         except OperationalError as error:
             session.rollback()
             raise StorageUnavailable("database") from error

@@ -133,3 +133,77 @@ def test_list_never_touches_blob_store(service, monkeypatch):
     page1 = svc.list(limit=1, cursor=None)
     assert page1.next_cursor is not None
     svc.list(limit=1, cursor=page1.next_cursor)
+
+
+# -- 删除（NS-D1-DELETE） -----------------------------------------------------------
+
+
+def test_delete_then_reads_are_not_found(service):
+    svc, repo = service
+    nb_id = f"nb_{'f' * 31}0"
+    _insert(repo, nb_id, _fixed_time(5))
+
+    svc.delete(nb_id)
+
+    from app.errors import NotebookNotFound
+    with pytest.raises(NotebookNotFound):
+        svc.get(nb_id, None)
+    with pytest.raises(NotebookNotFound):
+        svc.get_revision(nb_id, 1, None)
+
+
+def test_delete_repeat_and_nonexistent(service):
+    svc, repo = service
+    nb_id = f"nb_{'f' * 31}0"
+    _insert(repo, nb_id, _fixed_time(5))
+
+    svc.delete(nb_id)
+    svc.delete(nb_id)  # 重复删除不抛错
+
+    from app.errors import NotebookNotFound
+    with pytest.raises(NotebookNotFound):
+        svc.delete(f"nb_{'a' * 32}")
+
+
+def test_delete_excludes_from_list(service):
+    svc, repo = service
+    keep = f"nb_{'a' * 32}"
+    removed = f"nb_{'b' * 32}"
+    _insert(repo, keep, _fixed_time(5))
+    _insert(repo, removed, _fixed_time(5))
+
+    svc.delete(removed)
+    result = svc.list(limit=20, cursor=None)
+    assert _ids(result) == [keep]
+
+
+def test_delete_does_not_change_head_state(service):
+    svc, repo = service
+    nb_id = f"nb_{'f' * 31}0"
+    _insert(repo, nb_id, _fixed_time(5))
+    before = repo.get_notebook(nb_id)
+
+    svc.delete(nb_id)
+    after = repo.get_notebook(nb_id)
+
+    assert after.deleted_at is not None
+    assert after.current_revision == before.current_revision
+    assert after.current_content_hash == before.current_content_hash
+    assert after.updated_at == before.updated_at
+    assert repo.get_revision(nb_id, 1) is not None
+
+
+def test_delete_never_touches_blob_store(service, monkeypatch):
+    svc, repo = service
+    nb_id = f"nb_{'f' * 31}0"
+    _insert(repo, nb_id, _fixed_time(5))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("删除路径不得访问 BlobStore")
+
+    monkeypatch.setattr(svc.blob_store, "get", forbidden)
+    monkeypatch.setattr(svc.blob_store, "put", forbidden)
+    monkeypatch.setattr(svc.blob_store, "exists", forbidden)
+
+    svc.delete(nb_id)
+    svc.delete(nb_id)  # 重复删除同样不访问

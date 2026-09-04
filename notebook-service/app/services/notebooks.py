@@ -182,7 +182,8 @@ class NotebookService:
         self, notebook_id: str, if_none_match: str | None
     ) -> GetResult:
         notebook = self.repository.get_notebook(notebook_id)
-        if notebook is None:
+        if notebook is None or notebook.deleted_at is not None:
+            # 已软删除的 Notebook 对普通读取不可见。
             raise NotebookNotFound.for_id(notebook_id)
 
         revision = self.repository.get_revision(
@@ -225,7 +226,7 @@ class NotebookService:
         if_none_match: str | None,
     ) -> GetResult:
         notebook = self.repository.get_notebook(notebook_id)
-        if notebook is None:
+        if notebook is None or notebook.deleted_at is not None:
             raise NotebookNotFound.for_id(notebook_id)
 
         revision = self.repository.get_revision(notebook_id, revision_number)
@@ -282,6 +283,23 @@ class NotebookService:
             last = items[-1]
             next_cursor = encode_cursor(last.updated_at, last.notebook_id)
         return ListResult(items=items, next_cursor=next_cursor)
+
+    # -- delete ------------------------------------------------------------
+
+    def delete(self, notebook_id: str) -> None:
+        """软删除 Notebook。
+
+        - 从未存在：NotebookNotFound（404）；
+        - 首次删除与重复删除均成功（HTTP 层统一 204，便于网络失败后重试）；
+        - 不读取/删除 Blob，不删除 revision，不调用 Runtime Plane；
+        - 不推进 revision、不改 content hash/updated_at。
+        """
+        now = _utcnow()
+        outcome = self.repository.delete_notebook(
+            notebook_id=notebook_id, now=now
+        )
+        if outcome.kind == "not_found":
+            raise NotebookNotFound.for_id(notebook_id)
 
     # -- save ------------------------------------------------------------
 

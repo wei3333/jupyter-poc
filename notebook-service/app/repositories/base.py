@@ -18,6 +18,8 @@ class NotebookRow:
     current_content_hash: str
     created_at: datetime
     updated_at: datetime
+    # NULL 表示正常；非 NULL 表示软删除。
+    deleted_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,11 @@ class SaveOutcome:
     # revision_conflict 时的当前 head 信息
     current_revision: int | None = None
     current_content_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    kind: Literal["deleted", "already_deleted", "not_found"]
 
 
 class NotebookRepository(Protocol):
@@ -131,4 +138,15 @@ class NotebookRepository(Protocol):
         now: datetime,
     ) -> SaveOutcome:
         """保存：幂等权威检查 → notebook 存在性 → CAS → no-op/新 revision。"""
+        ...
+
+    def delete_notebook(
+        self, *, notebook_id: str, now: datetime
+    ) -> DeleteOutcome:
+        """软删除：仅 SET deleted_at = now。
+
+        - 从未存在：not_found；已有 deleted_at：already_deleted；否则 deleted；
+        - 不推进 revision、不改 current_content_hash/updated_at；
+        - 不删除 revision 行或 Blob，不访问 BlobStore，不调用 Runtime Plane。
+        """
         ...
