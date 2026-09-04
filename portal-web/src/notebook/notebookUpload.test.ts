@@ -122,6 +122,30 @@ describe('parseNotebookFile', () => {
     ).toThrow(UploadParseError)
   })
 
+  it('metadata 是数组时在本地失败', () => {
+    expect(() =>
+      parseNotebookFile(
+        'arraymeta.ipynb',
+        JSON.stringify(
+          notebookDoc({ metadata: [] }),
+        ),
+      ),
+    ).toThrow(UploadParseError)
+  })
+
+  it('cells 项是数组时在本地失败', () => {
+    expect(() =>
+      parseNotebookFile(
+        'arraycell.ipynb',
+        JSON.stringify(
+          notebookDoc({
+            cells: [[{ cell_type: 'code' }]],
+          }),
+        ),
+      ),
+    ).toThrow(UploadParseError)
+  })
+
   it('cells 不是数组时在本地失败', () => {
     expect(() =>
       parseNotebookFile(
@@ -180,6 +204,26 @@ describe('deriveUploadTitle', () => {
   it('处理后为空时返回 null（省略 title）', () => {
     expect(
       deriveUploadTitle('.ipynb'),
+    ).toBeNull()
+  })
+
+  it('.ipynb 后缀匹配大小写不敏感，去后缀后再 trim', () => {
+    expect(
+      deriveUploadTitle('Demo.IPYNB'),
+    ).toBe('Demo')
+
+    expect(
+      deriveUploadTitle('  Notes.iPyNb  '),
+    ).toBe('Notes')
+
+    expect(
+      deriveUploadTitle(
+        'A.ipynb.bak.IPYNB',
+      ),
+    ).toBe('A.ipynb.bak')
+
+    expect(
+      deriveUploadTitle('.IPYNB'),
     ).toBeNull()
   })
 

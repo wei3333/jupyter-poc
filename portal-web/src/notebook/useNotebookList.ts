@@ -78,7 +78,9 @@ export function useNotebookList() {
 
   /*
    * 首次显示时请求第一页：limit=20，不带 cursor。
-   * setState 全部在 await 之后执行。
+   * setState 全部在 await 之后执行，
+   * 且与 refresh 一样做 seq 一致性检查：
+   * 过期请求不得覆盖页面状态。
    */
   useEffect(() => {
     const controller = new AbortController()
@@ -97,7 +99,10 @@ export function useNotebookList() {
           signal: controller.signal,
         })
 
-        if (cancelled) {
+        if (
+          cancelled
+          || seq !== seqRef.current
+        ) {
           return
         }
 
@@ -108,6 +113,7 @@ export function useNotebookList() {
       } catch (error) {
         if (
           !cancelled
+          && seq === seqRef.current
           && !isAbortError(error)
         ) {
           setListError(
@@ -117,7 +123,10 @@ export function useNotebookList() {
           setErrorPhase('initial')
         }
       } finally {
-        if (!cancelled) {
+        if (
+          !cancelled
+          && seq === seqRef.current
+        ) {
           setInitialLoading(false)
         }
       }

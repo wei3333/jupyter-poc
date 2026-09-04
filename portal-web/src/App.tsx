@@ -281,8 +281,10 @@ function HomePage({
          * 明确的 4xx（含 INVALID_NOTEBOOK、
          * PAYLOAD_TOO_LARGE）结束该 operation；
          * 用户改选文件意味着新的逻辑上传。
+         * 清空 file input 使同一文件能重新选择。
          */
         setUploadPending(null)
+        resetFileInput(fileInput)
       }
 
       /*
@@ -334,6 +336,7 @@ function HomePage({
       /*
        * 本地文件读取 / JSON 解析错误属于
        * 上传 UI 错误，不发送 POST。
+       * 清空 file input 使同一文件能重新选择。
        */
       setUploadError(
         error instanceof UploadParseError
@@ -348,6 +351,7 @@ function HomePage({
       )
 
       setUploadPhase(null)
+      resetFileInput(input)
 
       return
     }
